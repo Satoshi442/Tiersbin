@@ -1,8 +1,0 @@
-{
-  "type": "preload-native",
-  "name": "VV Tier Override",
-  "author": "Kunal",
-  "version": "1.0.0",
-  "entry": "libVVTierOverride.so",
-  "minecraft_versions": []
-}
