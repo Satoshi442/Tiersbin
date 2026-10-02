@@ -2,9 +2,8 @@
 //
 // tiers.bin is base64 of a JSON file: {"gpu": {"<renderer>": <tier>, ...}}.
 // patchTiers() decodes it, changes one single-digit tier, re-encodes it, and
-// returns the result ONLY if it is exactly the same size as the input. Same
-// size matters: the hooks below patch bytes in place and never touch the
-// asset's length or read position.
+// returns the result. We pad with newlines to ensure the output size exactly
+// matches the input size, which keeps asset offsets/lengths consistent.
 #pragma once
 #include <cstddef>
 #include <string>
@@ -21,7 +20,7 @@ inline std::string b64decode(std::string_view in) {
     for (char c : in) {
         if (c == '=') break;
         size_t v = tbl.find(c);
-        if (v == std::string_view::npos) continue;  // skip whitespace
+        if (v == std::string_view::npos) continue;  // safely skips newlines/spaces
         acc = (acc << 6) | static_cast<unsigned>(v);
         bits += 6;
         if (bits >= 8) {
@@ -54,8 +53,7 @@ inline std::string b64encode(std::string_view in) {
     return out;
 }
 
-// Returns the patched file (same size as `file`), or "" if the GPU entry was
-// not found, wasn't a single digit, or the size would change.
+// Returns the patched file (padded to match original size), or "" if not found.
 inline std::string patchTiers(std::string_view file, std::string_view gpu, char tier) {
     std::string json = b64decode(file);
 
@@ -63,48 +61,79 @@ inline std::string patchTiers(std::string_view file, std::string_view gpu, char 
     size_t p = json.find(key);
     if (p == std::string::npos) return {};
     p += key.size();
-    while (p < json.size() && (json[p] == ' ' || json[p] == ':')) ++p;  // ": "
+    while (p < json.size() && (json[p] == ' ' || json[p] == ':')) ++p;
     if (p + 1 >= json.size()) return {};
     if (json[p] < '0' || json[p] > '9') return {};
-    if (json[p + 1] >= '0' && json[p + 1] <= '9') return {};  // multi-digit
+    if (json[p + 1] >= '0' && json[p + 1] <= '9') return {};  // skip multi-digit
 
     json[p] = tier;
     std::string out = b64encode(json);
-    return out.size() == file.size() ? out : std::string{};
+    
+    // Pad with newlines to perfectly match original file size. 
+    // The b64decode function safely ignores trailing newlines.
+    if (out.size() <= file.size()) {
+        out.append(file.size() - out.size(), '\n');
+        return out;
+    }
+    return {};
 }
 
-// Raises every GPU whose tier is below `minTier` up to `minTier`. Only touches
-// single-digit values inside the "gpu" object. Same-size rule as above.
-// `changed` (optional) receives how many entries were raised.
+// Raises every GPU whose tier is below `minTier` up to `minTier`. 
+// Uses robust brace-counting to handle nested JSON structures safely.
 inline std::string patchAllTiers(std::string_view file, char minTier, int *changed = nullptr) {
     std::string json = b64decode(file);
 
     size_t g = json.find("\"gpu\"");
     if (g == std::string::npos) return {};
+    
     size_t begin = json.find('{', g);
-    size_t end = json.find('}', begin == std::string::npos ? g : begin);
-    if (begin == std::string::npos || end == std::string::npos) return {};
+    if (begin == std::string::npos) return {};
+
+    // Robustly find the matching closing brace for the "gpu" object
+    int brace_count = 1;
+    size_t end = begin + 1;
+    while (end < json.size() && brace_count > 0) {
+        if (json[end] == '{') brace_count++;
+        else if (json[end] == '}') brace_count--;
+        end++;
+    }
+    if (brace_count != 0) return {}; // Malformed JSON
+    end--; // Point to the actual closing '}'
 
     int n = 0;
     for (size_t p = begin; p < end; ++p) {
         if (json[p] != '"') continue;
-        size_t q = json.find('"', p + 1);          // end of the key
+        
+        size_t q = json.find('"', p + 1);          // end of the GPU name key
         if (q == std::string::npos || q >= end) break;
+        
         size_t v = q + 1;
-        while (v < end && (json[v] == ' ' || json[v] == ':')) ++v;
+        while (v < end && (json[v] == ' ' || json[v] == ':')) ++v; // skip to value
+        
+        // Check if it's a single-digit tier value
         if (v + 1 < end && json[v] >= '0' && json[v] <= '9' &&
             !(json[v + 1] >= '0' && json[v + 1] <= '9')) {
-            if (json[v] < minTier) { json[v] = minTier; ++n; }
-            p = v;
+            if (json[v] < minTier) { 
+                json[v] = minTier; 
+                ++n; 
+            }
+            p = v; // Skip past the digit we just processed
         } else {
-            p = q;
+            p = q; // Skip to the end of the key if no valid tier found
         }
     }
+    
     if (changed) *changed = n;
     if (n == 0) return {};
 
     std::string out = b64encode(json);
-    return out.size() == file.size() ? out : std::string{};
+    
+    // Pad with newlines to perfectly match original file size.
+    if (out.size() <= file.size()) {
+        out.append(file.size() - out.size(), '\n');
+        return out;
+    }
+    return {};
 }
 
 }  // namespace vv
